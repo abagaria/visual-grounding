@@ -1,5 +1,6 @@
 import pdb
 from copy import deepcopy
+import pickle
 
 import matplotlib.pyplot as plt
 import argparse
@@ -204,7 +205,7 @@ def main():
     lookup = embeddings.RandEmbed(v.size(), device=device)
     hp = hyperparams.RandEmbedHParams(embed_size=lookup.embed_size)
 
-    data_set = COCODataset(*get_data_set_file_paths("toy"), v)
+    data_set = COCODataset(*get_data_set_file_paths("val"), v)
     data_set_size = len(data_set)
     print("Loading dataset of size {}, batch_size = {}".format(data_set_size, hp.batch_size))
     dataloader = DataLoader(data_set, batch_size=hp.batch_size, shuffle=True)
@@ -216,9 +217,12 @@ def main():
         cnn_encoder.load_state_dict(torch.load(args.restore_image))
         lut = construct_semantic_lookup_table(rnn_encoder, v, dataloader)
 
-        test_img = data_set.read_image("COCO_train2014_000000539984")
-        closest_captions = get_nn_captions_for_image(test_img, lut, cnn_encoder, device)
-        print("Closest Captions: ", closest_captions)
+        with open("validation_data_lut.pkl", "wb") as _f:
+            pickle.dump(lut, _f)
+
+        # test_img = data_set.read_image("COCO_train2014_000000318556")
+        # closest_captions = get_nn_captions_for_image(test_img, lut, cnn_encoder, device)
+        # print("Closest Captions: ", closest_captions)
 
         return lut
     else:
