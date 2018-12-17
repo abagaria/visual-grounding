@@ -8,11 +8,11 @@ import numpy as np
 import torch
 from torch import nn
 
-import allennlp.modules.elmo as allen_elmo
+# import allennlp.modules.elmo as allen_elmo
 
 # These are the different embedding sizes. Feel free to experiment
 # with different sizes for random.
-sizes = {"elmo": 1024, "glove": 200, "random": 10}
+sizes = {"elmo": 1024, "glove": 200, "random": 200}
 sizes["both"] = sizes["elmo"] + sizes["glove"]
 
 class Elmo(nn.Module):

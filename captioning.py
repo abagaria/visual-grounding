@@ -1,18 +1,8 @@
-#!/usr/bin/env python3
-from os import path
-import argparse
-import logging
-import multiprocessing
-import pickle
-from collections import OrderedDict
 import pdb
-import time
+from copy import deepcopy
 
 import matplotlib.pyplot as plt
-import seaborn as sns
-sns.set()
 import numpy as np
-import os
 
 # Pytorch Imports
 import torch
@@ -20,17 +10,46 @@ from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pack_padded_sequence
+import torchvision.models as models
+from tensorboardX import SummaryWriter
 
 from tqdm import tqdm
 
 # Stencil imports
 import embeddings
-from coco_dataset import *
+from coco_dataset import COCODataset, get_vocab_path, get_data_set_file_paths
+from vocab import Vocab
+import Constants
 import hyperparams
 
-class CaptioningNetwork(nn.Module):
-    """ Image captioning network. """
+def extract_feature_model(pretrained_vgg19):
+    new_vgg = deepcopy(pretrained_vgg19)
+    classifier_layers = list(list(pretrained_vgg19.children())[1].children())[:5]
+    new_vgg.classifier = nn.Sequential(*classifier_layers)
+    for p in new_vgg.parameters():
+        p.requires_grad = False
+    return new_vgg
 
+
+class EncoderCNN(nn.Module):
+    def __init__(self, embed_size, device):
+        """ Load the pre-trained VGG19 and replace top fc layer."""
+        super(EncoderCNN, self).__init__()
+        self.cnn = extract_feature_model(models.vgg19(pretrained=True))
+        self.linear = nn.Linear(self.cnn.classifier[3].out_features, embed_size)
+        self.bn = nn.BatchNorm1d(embed_size, momentum=0.01)
+
+        self._dev = device
+        self.to(device)
+
+    def forward(self, images):
+        """Extract feature vectors from input images."""
+        with torch.no_grad():
+            features = self.cnn(images)
+        features = features.reshape(features.size(0), -1)
+        return self.bn(self.linear(features))
+
+class EncoderRNN(nn.Module):
     def __init__(self, hidden_sz, embedding_lookup, rnn_layers=1, device=torch.device('cpu')):
         """
         The constructor for our net. The architecture of this net is the following:
@@ -47,7 +66,7 @@ class CaptioningNetwork(nn.Module):
                                        Either 'glove', 'elmo', 'both', or 'random'.
         :param num_layers (int): The number of RNN cells we want in our net (c.f num_layers param in torch.nn.LSTMCell)
         """
-        super(CaptioningNetwork, self).__init__()
+        super(EncoderRNN, self).__init__()
         self.hidden_sz = hidden_sz
         self.rnn_layers = rnn_layers
         self.num_outputs = 2
@@ -64,16 +83,6 @@ class CaptioningNetwork(nn.Module):
         ## Use GRU as your RNN architecture
         self.rnn_encoder = nn.GRU(self.embed_size, self.hidden_sz, num_layers=rnn_layers, batch_first=True)
 
-        self.classifier = nn.Sequential(
-            nn.Linear(self.hidden_sz, self.interm_size_1),
-            nn.LeakyReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(self.interm_size_1, self.interm_size_2),
-            nn.LeakyReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(self.interm_size_2, self.num_outputs)
-        )
-
         self._dev = device
         self.to(device)
 
@@ -83,6 +92,7 @@ class CaptioningNetwork(nn.Module):
                  :param seq_lens: original sequence lengths of each input (prior to padding)
             You should return a tensor of (batch_size x 2) logits for each class per batch element.
         """
+
         curr_batch_size = seq_lens.shape[0] # hint: use this for reshaping RNN hidden state
 
         # 1. Grab the embeddings:
@@ -91,17 +101,14 @@ class CaptioningNetwork(nn.Module):
         # 2. Sort seq_lens and embeds in descending order of seq_lens. (check out torch.sort)
         #    This is expected by torch.nn.utils.pack_padded_sequence.
         sorted_seq_lens, perm_idx = seq_lens.sort(0, descending=True)
-        sorted_seq_tensor = embeds[perm_idx]
+        sorted_seq_tensor = embeds[perm_idx].squeeze(1)
 
         # 3. Obtain a PackedSequence object from pack_padded_sequence.
         #    Be sure to pass batch_first=True as the first dimension of our input is the batch dim.
-        packed_input = pack_padded_sequence(sorted_seq_tensor, sorted_seq_lens, batch_first=True)
+        packed_input = pack_padded_sequence(sorted_seq_tensor, sorted_seq_lens.squeeze(1), batch_first=True)
 
         # 4. Apply the RNN over the sequence of packed embeddings to obtain a sentence encoding.
         output, hidden = self.rnn_encoder(packed_input, self.init_hidden(curr_batch_size))
-
-        # 5. Pass the sentence encoding (RNN hidden state) through your classifier net.
-        logits = self.classifier(hidden).squeeze(0)
 
         # 6. Remember to unsort the output from step 5. If you sorted seq_lens and obtained a permutation
         #    over its indices (perm_ix), then the sorted indices over perm_ix will "unsort".
@@ -110,161 +117,92 @@ class CaptioningNetwork(nn.Module):
         #       output = x[unperm_ix]
         #       return output
         _, unperm_idx = perm_idx.sort(0)
-        unsorted_logits = logits[unperm_idx].squeeze(1)
-        return unsorted_logits
+        unsorted_hidden_states = hidden.squeeze(0)[unperm_idx]
+        return unsorted_hidden_states
 
     def init_hidden(self, batch_size):
         return torch.zeros(self.rnn_layers, batch_size, self.hidden_sz, device=self._dev)
 
-def train(hp, embedding_lookup):
+def pre_process_image(image, device):
+    image3 = image.to(device)
+
+    # Some photos in the dataset are black and white - deal with those
+    if image3.shape[1] == 1:
+        pdb.set_trace()
+        target_image = torch.zeros(3, 224, 224, device=device)
+        target_image[0, :, :] = image3
+        image3 = target_image
+    return image3
+
+def train(hp, embedding_lookup, device):
     """ This is the main training loop
             :param hp: HParams instance (see hyperparams.py)
             :param embedding_lookup: torch module for performing embedding lookups (see embeddings.py)
     """
-    modes = ['train', 'val']
+    vocab = Vocab(filename=get_vocab_path(),
+                  data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
+    data_set = COCODataset(*get_data_set_file_paths("val"), vocab)
+    data_set_size = len(data_set)
+    dataloader = DataLoader(data_set, batch_size=hp.batch_size, shuffle=True)
 
-    # Note: each of these are dicts that map mode -> object, depending on if we're using the training or dev data.
-    base_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    data_dir = os.path.join(base_dir, 'data')
-    coco_dir = os.path.join(data_dir, 'coco')
-    anno_dir = os.path.join(coco_dir, 'annotations')
+    caption_model = EncoderRNN(hp.rnn_hidden_size, embedding_lookup, device=device)
+    image_model = EncoderCNN(hp.rnn_hidden_size, device)
+    print(caption_model)
+    print(image_model)
 
-    image_dirs = {mode: os.path.join(coco_dir, "{}2014".format(mode)) for mode in modes}
-    anno_dirs = {mode: os.path.join(anno_dir, "captions_{}2014.json".format(mode)) for mode in modes}
-    dataloaders = {mode: get_coco_captions_data_loader(image_dirs[mode], anno_dirs[mode]) for mode in modes}
-    data_sizes = {mode: len(dataloaders[mode]) for mode in modes} # hint: useful for averaging loss per batch
+    criterion = nn.MSELoss()
+    params = list(caption_model.parameters()) + list(image_model.linear.parameters()) + list(image_model.bn.parameters())
+    optimizer = optim.Adam(params, lr=hp.learn_rate)
 
+    training_loss = []
+    writer = SummaryWriter()
+    iteration = 0
 
-    model = CaptioningNetwork(hp.rnn_hidden_size, embedding_lookup, device=DEV)
-    print(model)
-    loss_func = nn.CrossEntropyLoss() # TODO choose a loss criterion
-    optimizer = optim.Adam(model.parameters(), lr=hp.learn_rate)
+    for epoch in range(1, hp.num_epochs + 1):
+        running_loss = 0.
+        for vectorized_seq, seq_len, image in tqdm(dataloader, desc='{}/{}'.format(epoch, hp.num_epochs)):
+            vectorized_seq = vectorized_seq  # note: we don't pass this to GPU yet
+            seq_len = seq_len.to(device)
+            image = image.to(device)
 
-    train_loss = [] # training loss per epoch, averaged over batches
-    dev_loss = [] # dev loss each epoch, averaged over batches
+            caption_model.train()
+            caption_model.zero_grad()
 
-    # Note: similar to above, we can map mode -> list to append to the appropriate list
-    losses = {'train': train_loss, 'dev': dev_loss}
+            # Forward pass through our two encoder models
+            caption_features = caption_model(vectorized_seq, seq_len).squeeze(1)
+            image_features = image_model(image)
 
-    for epoch in range(1, hp.num_epochs+1):
-        for mode in modes:
-            running_loss = 0.0
-            for (vectorized_seq, seq_len), label in tqdm(dataloaders[mode], desc='{}:{}/{}'.format(mode, epoch, hp.num_epochs)):
-                vectorized_seq = vectorized_seq # note: we don't pass this to GPU yet
-                seq_len = seq_len.to(DEV)
-                label = label.long().to(DEV)
-                if mode == 'train':
-                    model.train() # tell pytorch to set the model to train mode
-                    # TODO complete the training step. Hint: you did this for hw1
-                    # don't forget to update running_loss as well
-                    model.zero_grad()  # clear gradients (torch will accumulate them)
-                    logits = model(vectorized_seq, seq_len)
+            loss = criterion(caption_features, image_features)
+            loss.backward()
+            optimizer.step()
 
-                    # max_logits = torch.max(logits, dim=1)[0]
-                    loss = loss_func(logits, label)
+            running_loss += loss.item()
+            writer.add_scalar("Loss", loss.item(), iteration)
+            iteration = iteration + 1
 
-                    loss.backward()
-                    optimizer.step()
-                    running_loss += loss.item()
+        avg_loss = running_loss / (data_set_size / hp.batch_size)
+        training_loss.append(avg_loss)
+        print("Loss: {}".format(avg_loss))
 
-                else:
-                    model.eval()
-                    with torch.no_grad():
-                        logits = model(vectorized_seq, seq_len)
-                        loss = loss_func(logits, label)
-                        running_loss += loss.item()
-            avg_loss = running_loss/(data_sizes[mode]/64)
-            losses[mode].append(avg_loss)
-            print("{} Loss: {}".format(mode, avg_loss))
+        torch.save(image_model.state_dict(), "saved_runs/image_model_{i}_weights.pt".format(i=epoch))
+        torch.save(caption_model.state_dict(), "saved_runs/caption_model_{i}_weights.pt".format(i=epoch))
 
-        torch.save(model.state_dict(), "{embed}_{i}_weights.pt".format(embed=args.embedding, i=epoch))
-
-    # TODO plot train_loss and dev_loss
-    plt.subplot(1, 2, 1)
-    plt.plot(losses['train'])
-    plt.title('Training loss')
-
-    plt.subplot(1, 2, 2)
-    plt.plot(losses['dev'])
-    plt.title('Development loss')
-
-    plt.savefig("{}_learning_curves_{}.png".format(args.embedding, time.time()))
-    plt.close()
-
-def evaluate(hp, embedding_lookup):
-    """ This is used for the evaluation of the net. """
-    # mode = 'test' # use test data
-    # dataloader = get_coco_captions_data_loader("", "")
-    # dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=6)
-    # model = SentimentNetwork(hp.rnn_hidden_size, embedding_lookup, device=DEV)
-    # model.load_state_dict(torch.load(args.restore))
-    #
-    # data_size = len(dataset)
-    #
-    # confusion = torch.zeros((2,2)) # TODO fill out this confusion matrix
-    # for (vectorized_seq, seq_len), label in tqdm(dataloader, ascii=True):
-    #     vectorized_seq = vectorized_seq
-    #     seq_len = seq_len.to(DEV)
-    #     label = label.to(DEV)
-    #     model.eval()
-    #     with torch.no_grad():
-    #         logits = model(vectorized_seq, seq_len)
-    #         # TODO obtain a sentiment class prediction from output
-    #         predicted_labels = torch.argmax(logits, dim=1)
-    #         # assert sum(label.numpy().shape) == 1 and sum(predicted_labels.numpy().shape) == 1, "Expected one label"
-    #         # confusion[label.numpy()[0]][predicted_labels.numpy()[0]] += 1
-    #         confusion[label, predicted_labels] += 1
-    #
-    # accuracy = np.trace(confusion.numpy()) * 100. / data_size # TODO
-    # print("Sentiment Classification Accuracy of {:.2f}%".format(accuracy))
-    # print("Confusion matrix:")
-    # print(confusion)
+    plt.figure()
+    plt.plot(training_loss)
+    plt.title("Training Loss")
+    plt.show()
 
 def main():
-    # Map word index back to the word's string. Due to a quirk in
-    # pytorch's DataLoader implementation, we must produce batches of
-    # integer id sequences. However, ELMo embeddings are character-level
-    # and as such need the word. Additionally, we do not wish to restrict
-    # ElMo to GloVe's vocabulary, and thus must map words to non-glove IDs here:
-    with open(path.join(args.data, "idx2word.dict"), "rb") as f:
-        idx2word = pickle.load(f)
+    device = torch.device("cuda")
+    vocab_path = get_vocab_path()
 
-    # --- Select hyperparameters and embedding lookup classes
-    # ---  based on the embedding type:
-    if args.embedding == "elmo":
-        lookup = embeddings.Elmo(idx2word, device=DEV)
-        hp = hyperparams.ElmoHParams()
-    elif args.embedding == "glove":
-        lookup = embeddings.Glove(args.data, idx2word, device=DEV)
-        hp = hyperparams.GloveHParams()
-    elif args.embedding == "both":
-        lookup = embeddings.ElmoGlove(args.data, idx2word, device=DEV)
-        hp = hyperparams.ElmoGloveHParams()
-    elif args.embedding == "random":
-        lookup = embeddings.RandEmbed(len(idx2word), device=DEV)
-        hp = hyperparams.RandEmbedHParams(embed_size=lookup.embed_size)
-    else:
-        print("--embeddings must be one of: 'elmo', 'glove', 'both', or 'random'")
+    v = Vocab(filename=vocab_path,
+              data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
 
-    # --- Either load and evaluate a trained model, or train and save a model ---
-    if args.restore:
-        evaluate(hp, lookup)
-    else:
-        train(hp, lookup)
+    lookup = embeddings.RandEmbed(v.size(), device=device)
+    hp = hyperparams.RandEmbedHParams(embed_size=lookup.embed_size)
 
-if __name__ == '__main__':
-    logger = multiprocessing.get_logger()
-    logger.setLevel(logging.WARNING)
+    train(hp, lookup, device)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, help="path to data file", default="data")
-    parser.add_argument("--embedding", type=str, help="embedding type")
-    parser.add_argument("--device", type=str, help="cuda for gpu and cpu otherwise", default="cpu")
-    parser.add_argument("--restore", help="filepath to restore")
-    args = parser.parse_args()
-
-    DEV = torch.device(args.device)
-
-    print("######################### Using {} ############################".format(DEV))
-
+if __name__ == "__main__":
     main()
