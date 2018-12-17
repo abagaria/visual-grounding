@@ -1,13 +1,10 @@
 import pdb
 from copy import deepcopy
-from IPython import embed
-from collections import defaultdict
 
 import matplotlib.pyplot as plt
-import numpy as np
 import argparse
 
-# Pytorch Imports
+# PyTorch Imports
 import torch
 from torch import nn
 from torch import optim
@@ -24,6 +21,7 @@ from coco_dataset import COCODataset, get_vocab_path, get_data_set_file_paths
 from vocab import Vocab
 import Constants
 import hyperparams
+from lookup_table import construct_semantic_lookup_table, get_nn_captions_for_image
 
 def extract_feature_model(pretrained_vgg19):
     new_vgg = deepcopy(pretrained_vgg19)
@@ -137,17 +135,13 @@ def pre_process_image(image, device):
         image3 = target_image
     return image3
 
-def train(hp, embedding_lookup, device):
+def train(hp, embedding_lookup, dataloader, device):
     """ This is the main training loop
             :param hp: HParams instance (see hyperparams.py)
             :param embedding_lookup: torch module for performing embedding lookups (see embeddings.py)
+            :param dataloader: ms-coco dataloader
+            :param device: CPU / Cuda
     """
-    vocab = Vocab(filename=get_vocab_path(),
-                  data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
-    data_set = COCODataset(*get_data_set_file_paths("toy"), vocab)
-    data_set_size = len(data_set)
-    print("Loading dataset of size {}, batch_size = {}".format(data_set_size, hp.batch_size))
-    dataloader = DataLoader(data_set, batch_size=hp.batch_size, shuffle=True)
 
     caption_model = EncoderRNN(hp.rnn_hidden_size, embedding_lookup, device=device)
     image_model = EncoderCNN(hp.rnn_hidden_size, device)
@@ -170,8 +164,9 @@ def train(hp, embedding_lookup, device):
             image = image.to(device)
 
             caption_model.train()
-            caption_model.zero_grad()
             image_model.train()
+            caption_model.zero_grad()
+            image_model.zero_grad()
 
             # Forward pass through our two encoder models
             caption_features = caption_model(vectorized_seq, seq_len).squeeze(1)
@@ -185,7 +180,7 @@ def train(hp, embedding_lookup, device):
             writer.add_scalar("Loss", loss.item(), iteration)
             iteration = iteration + 1
 
-        avg_loss = running_loss / (data_set_size / hp.batch_size)
+        avg_loss = running_loss / (len(dataloader) / hp.batch_size)
         training_loss.append(avg_loss)
         print("Loss: {}".format(avg_loss))
 
@@ -197,43 +192,6 @@ def train(hp, embedding_lookup, device):
     plt.title("Training Loss")
     plt.savefig("random_mse_training_loss.png")
 
-    lut = construct_lookup_table(vocab, image_model, caption_model)
-
-    return lut
-
-def construct_lookup_table(vocab, image_model, caption_model):
-    data_set = COCODataset(*get_data_set_file_paths("toy"), vocab)
-    dataloader = DataLoader(data_set, batch_size=10, shuffle=True)
-    print("Dataset length = {}".format(len(data_set)))
-    print("Constructing final lookup table")
-    lut = defaultdict()
-    for vectorized_seq, seq_len, image in tqdm(dataloader):
-        caption_model.eval()
-        image_model.eval()
-        image_features = image_model(image)
-
-        for batch_idx in range(image_features.shape[0]):
-            image_feature = image_features[batch_idx, :]
-            seq = vectorized_seq[batch_idx, :]
-            sentence = vocab.convertToLabels(seq.detach().numpy().tolist(), -1)
-            lut[image_feature] = sentence
-
-    return lut
-
-def test_image_from_training_data(lut, image_model, vocabulary):
-    def get_test_image(vocab):
-        data_set = COCODataset(*get_data_set_file_paths("toy"), vocab)
-        img = data_set.read_image("COCO_train2014_000000539984")
-        return img
-    image_model.eval()
-    test_image = get_test_image(vocabulary)
-    image_features = image_model(test_image.unsqueeze(0))
-    products = []
-    for feature in lut.keys():
-        product = torch.dot(image_features.squeeze(0), feature)
-        products.append((product.item(), lut[feature]))
-    return sorted(products, reverse=True)[:3]
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--restore_image", help="filepath to restore")
@@ -242,25 +200,30 @@ def main():
 
     device = torch.device("cuda")
     vocab_path = get_vocab_path()
-
-    v = Vocab(filename=vocab_path,
-              data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
-
+    v = Vocab(filename=vocab_path, data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
     lookup = embeddings.RandEmbed(v.size(), device=device)
     hp = hyperparams.RandEmbedHParams(embed_size=lookup.embed_size)
+
+    data_set = COCODataset(*get_data_set_file_paths("toy"), v)
+    data_set_size = len(data_set)
+    print("Loading dataset of size {}, batch_size = {}".format(data_set_size, hp.batch_size))
+    dataloader = DataLoader(data_set, batch_size=hp.batch_size, shuffle=True)
 
     if args.restore_image and args.restore_caption:
         rnn_encoder = EncoderRNN(hp.rnn_hidden_size, lookup, device=device)
         cnn_encoder = EncoderCNN(hp.rnn_hidden_size, device)
         rnn_encoder.load_state_dict(torch.load(args.restore_caption))
         cnn_encoder.load_state_dict(torch.load(args.restore_image))
-        lut = construct_lookup_table(v, cnn_encoder, rnn_encoder)
+        lut = construct_semantic_lookup_table(rnn_encoder, v, dataloader)
 
-        print(test_image_from_training_data(lut, cnn_encoder, v))
+        test_img = data_set.read_image("COCO_train2014_000000539984")
+        closest_captions = get_nn_captions_for_image(test_img, lut, cnn_encoder, device)
+        print("Closest Captions: ", closest_captions)
+
+        return lut
     else:
-        lut = train(hp, lookup, device)
-
-    return lut
+        train(hp, lookup, dataloader, device)
+        return None
 
 if __name__ == "__main__":
     lookup_table = main()
