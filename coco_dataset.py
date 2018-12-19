@@ -95,7 +95,7 @@ def get_data_set_file_paths(mode="val"):
     prjt_dir = os.path.join(base_dir, "visual-grounding")
     data_dir = os.path.join(prjt_dir, "data")
     anno_dir = os.path.join(data_dir, "annotations")
-    image_dir = os.path.join(data_dir, "{}2014".format("train" if mode == "toy" else mode))
+    image_dir = os.path.join(data_dir, "{}2014".format("val" if mode == "toyval" else mode))
 
     tokens_path = os.path.join(anno_dir, "captions_{}2014.toks".format(mode))
     iids_path = os.path.join(anno_dir, "imageIDs_{}2014.txt".format(mode))
@@ -109,7 +109,7 @@ def get_vocab_path():
     return os.path.join(data_dir, 'coco.vocab')
 
 if __name__ == '__main__':
-    tokens_path, iids_path, image_dir = get_data_set_file_paths(mode="toy")
+    tokens_path, iids_path, image_dir = get_data_set_file_paths(mode="toyval")
     vocab_path = get_vocab_path()
 
     v = Vocab(filename=vocab_path, data=[Constants.PAD_WORD, Constants.UNK_WORD, Constants.BOS_WORD, Constants.EOS_WORD])
