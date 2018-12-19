@@ -71,9 +71,6 @@ class EncoderRNN(nn.Module):
         super(EncoderRNN, self).__init__()
         self.hidden_sz = hidden_sz
         self.rnn_layers = rnn_layers
-        self.num_outputs = 2
-        self.interm_size_1 = 256
-        self.interm_size_2 = 64
 
         self.embedding_lookup = embedding_lookup.to(device) # instance of torch.nn.Module
         self.embed_size = embedding_lookup.embed_size # int value
@@ -149,20 +146,21 @@ def train(hp, embedding_lookup, dataloader, device):
     print(caption_model)
     print(image_model)
 
-    criterion = nn.MSELoss()
+    criterion = nn.CosineEmbeddingLoss(margin=0.1)
     params = list(caption_model.parameters()) + list(image_model.linear.parameters()) + list(image_model.bn.parameters())
     optimizer = optim.Adam(params, lr=hp.learn_rate)
 
     training_loss = []
-    writer = SummaryWriter()
+    writer = SummaryWriter("cos_loss")
     iteration = 0
 
     for epoch in range(1, hp.num_epochs + 1):
         running_loss = 0.
-        for vectorized_seq, seq_len, image in tqdm(dataloader, desc='{}/{}'.format(epoch, hp.num_epochs)):
+        for vectorized_seq, seq_len, image, related in tqdm(dataloader, desc='{}/{}'.format(epoch, hp.num_epochs)):
             vectorized_seq = vectorized_seq  # note: we don't pass this to GPU yet
             seq_len = seq_len.to(device)
             image = image.to(device)
+            related = related.to(device)
 
             caption_model.train()
             image_model.train()
@@ -173,7 +171,7 @@ def train(hp, embedding_lookup, dataloader, device):
             caption_features = caption_model(vectorized_seq, seq_len).squeeze(1)
             image_features = image_model(image)
 
-            loss = criterion(caption_features, image_features)
+            loss = criterion(caption_features, image_features, related)
             loss.backward()
             optimizer.step()
 
@@ -215,7 +213,7 @@ def main():
         cnn_encoder = EncoderCNN(hp.rnn_hidden_size, device)
         rnn_encoder.load_state_dict(torch.load(args.restore_caption))
         cnn_encoder.load_state_dict(torch.load(args.restore_image))
-        lut = construct_semantic_lookup_table(rnn_encoder, v, dataloader)
+        lut = construct_semantic_lookup_table(rnn_encoder, v, dataloader, device)
 
         with open("validation_data_lut.pkl", "wb") as _f:
             pickle.dump(lut, _f)

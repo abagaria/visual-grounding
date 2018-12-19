@@ -29,4 +29,4 @@ class ElmoGloveHParams(HParams):
 
 class RandEmbedHParams(HParams):
     def __init__(self, embed_size):
-        super(RandEmbedHParams, self).__init__(bs=10, lr=1e-4, ne=1, hs=embed_size)
+        super(RandEmbedHParams, self).__init__(bs=10, lr=1e-4, ne=12, hs=embed_size)

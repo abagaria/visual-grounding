@@ -12,7 +12,7 @@ from torch import nn
 
 # These are the different embedding sizes. Feel free to experiment
 # with different sizes for random.
-sizes = {"elmo": 1024, "glove": 200, "random": 200}
+sizes = {"elmo": 1024, "glove": 200, "random": 500}
 sizes["both"] = sizes["elmo"] + sizes["glove"]
 
 class Elmo(nn.Module):
