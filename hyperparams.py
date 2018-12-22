@@ -9,11 +9,12 @@
 """
 
 class HParams:
-    def __init__(self, bs, lr, ne, hs):
+    def __init__(self, bs, lr, ne, hs, wes=200):
         self.batch_size = bs
         self.learn_rate = lr
         self.num_epochs = ne
         self.rnn_hidden_size = hs
+        self.word_embedding_size = wes
 
 class ElmoHParams(HParams):
     def __init__(self):
@@ -29,4 +30,4 @@ class ElmoGloveHParams(HParams):
 
 class RandEmbedHParams(HParams):
     def __init__(self, embed_size):
-        super(RandEmbedHParams, self).__init__(bs=10, lr=1e-4, ne=12, hs=embed_size)
+        super(RandEmbedHParams, self).__init__(bs=64, lr=5e-4, ne=1, hs=embed_size)

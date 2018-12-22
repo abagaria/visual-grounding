@@ -120,3 +120,17 @@ class RandEmbed(nn.Module):
         batch = batch.to(self._dev)
         return self.embeddings(batch)
 
+class VisualEmbed(nn.Module):
+    def __init__(self, embeddings_file, vocab, device=torch.device("cuda")):
+        super(VisualEmbed, self).__init__()
+        self.embeddings_file = embeddings_file
+        self.vocab = vocab
+        self.device = device
+
+        visual_embeddings = np.load(embeddings_file)
+        self.embeddings = nn.Embedding.from_pretrained(torch.from_numpy(visual_embeddings))
+        self.embed_size = visual_embeddings.shape[-1]
+
+    def forward(self, x):
+        x = x.to(self.device)
+        return self.embeddings(x)

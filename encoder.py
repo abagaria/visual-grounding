@@ -33,7 +33,7 @@ class EncoderCNN(nn.Module):
         return self.bn(self.linear(features))
 
 class EncoderRNN(nn.Module):
-    def __init__(self, hidden_sz, embedding_lookup, rnn_layers=1, device=torch.device('cpu')):
+    def __init__(self, hidden_sz, embedding_lookup, rnn_layers=2, device=torch.device('cpu')):
         """
         The constructor for our net. The architecture of this net is the following:
 
@@ -61,7 +61,7 @@ class EncoderRNN(nn.Module):
         ##  activations, and dropout into one module
         ##
         ## Use GRU as your RNN architecture
-        self.rnn_encoder = nn.GRU(self.embed_size, self.hidden_sz, num_layers=rnn_layers, batch_first=True)
+        self.rnn_encoder = nn.GRU(self.embed_size, self.hidden_sz, num_layers=rnn_layers, batch_first=True, bidirectional=True)
 
         self._dev = device
         self.to(device)
@@ -97,8 +97,8 @@ class EncoderRNN(nn.Module):
         #       output = x[unperm_ix]
         #       return output
         _, unperm_idx = perm_idx.sort(0)
-        unsorted_hidden_states = hidden.squeeze(0)[unperm_idx]
+        unsorted_hidden_states = hidden[:, unperm_idx, :].squeeze(2)
         return unsorted_hidden_states
 
     def init_hidden(self, batch_size):
-        return torch.zeros(self.rnn_layers, batch_size, self.hidden_sz, device=self._dev)
+        return torch.zeros(2*self.rnn_layers, batch_size, self.hidden_sz, device=self._dev)

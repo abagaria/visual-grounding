@@ -30,20 +30,20 @@ class COCODataset(data.Dataset):
         return len(self.unpadded_sentences)
 
     def __getitem__(self, i):
-        if random.random() > 0.2:
-            sentence = deepcopy(self.padded_sentences[i])
-            seq_length = torch.tensor([len(self.unpadded_sentences[i])], dtype=torch.long)
-            image_filename = deepcopy(self.image_filenames[i])
-            image = deepcopy(self.read_image(image_filename))
-            related = torch.tensor(1, dtype=torch.float)
-            return sentence, seq_length, image, related
+        # if random.random() > 0.2:
+        sentence = deepcopy(self.padded_sentences[i])
+        seq_length = torch.tensor([len(self.unpadded_sentences[i])], dtype=torch.long)
         image_filename = deepcopy(self.image_filenames[i])
         image = deepcopy(self.read_image(image_filename))
-        random_index = random.choice(range(len(self.unpadded_sentences)))
-        sentence = deepcopy(self.padded_sentences[random_index])
-        seq_length = torch.tensor([len(self.unpadded_sentences[random_index])], dtype=torch.long)
-        not_related = torch.tensor(-1, dtype=torch.float)
-        return sentence, seq_length, image, not_related
+        # related = torch.tensor(1, dtype=torch.float)
+        return sentence, seq_length, image
+        # image_filename = deepcopy(self.image_filenames[i])
+        # image = deepcopy(self.read_image(image_filename))
+        # random_index = random.choice(range(len(self.unpadded_sentences)))
+        # sentence = deepcopy(self.padded_sentences[random_index])
+        # seq_length = torch.tensor([len(self.unpadded_sentences[random_index])], dtype=torch.long)
+        # not_related = torch.tensor(-1, dtype=torch.float)
+        # return sentence, seq_length, image, not_related
 
     @staticmethod
     def read_image_filenames(filename):

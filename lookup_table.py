@@ -46,7 +46,7 @@ def construct_semantic_lookup_table(caption_model, vocab, dataloader, device):
 def get_nn_captions_for_image(image, lut, image_model, device):
     image_model.eval()
     test_image = image.to(device)
-    image_features = image_model(test_image.unsqueeze(0))
+    image_features = image_model(test_image.unsqueeze(0)).to(torch.device("cpu"))
     products = []
     for feature in lut.keys():
         product = F.cosine_similarity(image_features, feature.unsqueeze(0))
